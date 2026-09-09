@@ -1,87 +1,52 @@
 import os
+import sys
 import glob
+
+# Ensure root directory is in python path
+ROOT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+if ROOT_DIR not in sys.path:
+    sys.path.insert(0, ROOT_DIR)
+
 import numpy as np
 import matplotlib.pyplot as plt
 from PIL import Image
-from sklearn.metrics.pairwise import cosine_similarity, euclidean_distances
+from src.vectorizers.image_vectorizer import ImageVectorizer as CoreImageVectorizer
+from src.metrics.distance_metrics import DistanceMetrics
+from src.metrics.similarity_engine import SimilarityRetrievalEngine
 
 class ImageVectorizer:
-    def __init__(self, image_size=(64, 64), color_mode='RGB'):
-        self.image_size = image_size
-        self.color_mode = color_mode
+    """Backward-compatible wrapper around core ImageVectorizer."""
+    def __init__(self, image_size=(64, 64), color_mode='RGB', extraction_mode='flattened_spatial'):
+        self._vectorizer = CoreImageVectorizer(
+            image_size=image_size,
+            color_mode=color_mode,
+            extraction_mode=extraction_mode
+        )
         self.image_paths = []
         self.vectors = None
 
     def load_and_vectorize(self, directory):
-        """
-        Loads all PNG images from a directory, converts color mode,
-        resizes them to uniform dimensions, normalizes pixels to [0, 1],
-        and flattens them into 1D feature vectors.
-        """
-        self.image_paths = sorted(glob.glob(os.path.join(directory, "*.png")))
-        if not self.image_paths:
-            raise FileNotFoundError(f"No PNG images found in {directory}")
-
-        vectors_list = []
-        for path in self.image_paths:
-            img = Image.open(path)
-            
-            # Convert color mode if needed
-            if img.mode != self.color_mode:
-                img = img.convert(self.color_mode)
-                
-            # Resize
-            img = img.resize(self.image_size)
-            
-            # Convert to numpy array and normalize to [0, 1]
-            img_array = np.array(img, dtype=np.float32) / 255.0
-            
-            # Flatten to 1D vector
-            flattened = img_array.flatten()
-            vectors_list.append(flattened)
-            
-        self.vectors = np.array(vectors_list)
+        self.vectors = self._vectorizer.load_and_vectorize(directory)
+        self.image_paths = self._vectorizer.image_paths_
         return self.vectors
 
     def find_similar_images(self, query_index, top_n=3, metric='cosine'):
-        """
-        Finds the top_n most similar images to query_index using cosine similarity or euclidean distance.
-        Returns a list of dictionaries with 'path', 'filename', and 'score'.
-        """
-        if self.vectors is None or len(self.vectors) == 0:
-            raise ValueError("Vectors not initialized. Call load_and_vectorize first.")
-            
-        query_vector = self.vectors[query_index].reshape(1, -1)
+        engine = SimilarityRetrievalEngine(self.vectors, identifiers=[os.path.basename(p) for p in self.image_paths])
+        metric_key = 'cosine_sim' if metric == 'cosine' else 'euclidean'
+        results = engine.query_top_k(self.vectors[query_index], top_k=top_n, metric=metric_key, exclude_index=query_index)
         
-        if metric == 'cosine':
-            # Cosine similarity: 1 is most similar, -1 is opposite
-            scores = cosine_similarity(query_vector, self.vectors)[0]
-            ranked_indices = np.argsort(scores)[::-1]
-        elif metric == 'euclidean':
-            # Euclidean distance: 0 is identical, higher is more distant
-            scores = euclidean_distances(query_vector, self.vectors)[0]
-            ranked_indices = np.argsort(scores)
-        else:
-            raise ValueError("Unsupported metric. Choose 'cosine' or 'euclidean'.")
-            
-        results = []
-        for idx in ranked_indices:
-            if idx != query_index:
-                results.append({
-                    'index': idx,
-                    'path': self.image_paths[idx],
-                    'filename': os.path.basename(self.image_paths[idx]),
-                    'score': float(scores[idx])
-                })
-                if len(results) >= top_n:
-                    break
-                    
-        return results
+        legacy_results = []
+        for r in results:
+            idx = r['index']
+            legacy_results.append({
+                'index': idx,
+                'path': self.image_paths[idx],
+                'filename': os.path.basename(self.image_paths[idx]),
+                'score': r['score']
+            })
+        return legacy_results
 
     def plot_similarity_results(self, query_index, cosine_matches, euclidean_matches, output_path=None):
-        """
-        Visualizes the query image alongside top matches from Cosine Similarity and Euclidean Distance.
-        """
         top_n = max(len(cosine_matches), len(euclidean_matches))
         fig, axes = plt.subplots(2, top_n + 1, figsize=(3 * (top_n + 1), 6))
         
@@ -122,29 +87,30 @@ class ImageVectorizer:
         if output_path:
             plt.savefig(output_path, dpi=150, bbox_inches='tight')
             print(f"Comparison plot saved successfully to: {output_path}")
+            plt.close(fig)
         
         return fig
 
-
 if __name__ == "__main__":
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    image_dir = os.path.join(script_dir, '..', 'data', 'images')
-    output_plot_path = os.path.join(script_dir, '..', 'data', 'similarity_results.png')
+    image_dir = os.path.join(ROOT_DIR, 'data', 'images')
+    output_plot_path = os.path.join(ROOT_DIR, 'data', 'similarity_results.png')
     
     if not os.path.exists(image_dir) or len(glob.glob(os.path.join(image_dir, "*.png"))) == 0:
         print(f"Error: Images directory {image_dir} is empty or missing.")
         print("Please run generate_images.py first.")
         exit(1)
         
-    print("--- Day 2: Image Vectorization & Similarity Search ---")
-    vectorizer = ImageVectorizer(image_size=(64, 64), color_mode='RGB')
+    print("=================================================================")
+    print("            DAY 2: IMAGE PATTERN VECTORIZATION & SEARCH           ")
+    print("=================================================================")
+    vectorizer = ImageVectorizer(image_size=(64, 64), color_mode='RGB', extraction_mode='flattened_spatial')
     vectors = vectorizer.load_and_vectorize(image_dir)
     
-    print(f"Total Images Vectorized: {len(vectors)}")
-    print(f"Vector Space Shape     : {vectors.shape} (Flattened 64x64x3 = {64*64*3} features)")
-    print(f"Pixel Value Range      : Min={vectors.min():.2f}, Max={vectors.max():.2f}\n")
+    print(f"Total Images Vectorized : {len(vectors)}")
+    print(f"Vector Space Shape      : {vectors.shape} (Flattened 64x64x3 = {vectors.shape[1]} features)")
+    print(f"Pixel Value Range       : Min={vectors.min():.2f}, Max={vectors.max():.2f}\n")
     
-    # Select sample query image: circle_red.png or first available
+    # Select sample query image
     query_idx = 0
     for idx, path in enumerate(vectorizer.image_paths):
         if "circle_red" in path:
@@ -154,18 +120,16 @@ if __name__ == "__main__":
     query_filename = os.path.basename(vectorizer.image_paths[query_idx])
     print(f"=== Query Image: {query_filename} (Index: {query_idx}) ===")
     
-    # Cosine Similarity
     print("\nTop 3 by Cosine Similarity (Higher is more similar):")
     cosine_results = vectorizer.find_similar_images(query_idx, top_n=3, metric='cosine')
     for res in cosine_results:
-        print(f"  - {res['filename']:<20} -> Similarity Score: {res['score']:.4f}")
+        print(f"  * {res['filename']:<22} -> Similarity Score: {res['score']:.4f}")
         
-    # Euclidean Distance
     print("\nTop 3 by Euclidean Distance (Lower is closer):")
     euclidean_results = vectorizer.find_similar_images(query_idx, top_n=3, metric='euclidean')
     for res in euclidean_results:
-        print(f"  - {res['filename']:<20} -> Euclidean Distance: {res['score']:.4f}")
+        print(f"  * {res['filename']:<22} -> Euclidean Distance: {res['score']:.4f}")
         
-    # Generate visualization plot
     print("\nGenerating similarity visualization plot...")
     vectorizer.plot_similarity_results(query_idx, cosine_results, euclidean_results, output_plot_path)
+    print("=================================================================\n")
